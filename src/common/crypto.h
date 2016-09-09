@@ -140,12 +140,12 @@ crypto_cipher_t *crypto_cipher_new_with_iv(const char *key, const char *iv);
 void crypto_cipher_free(crypto_cipher_t *env);
 
 /* public key crypto */
-MOCK_DECL(int, crypto_pk_generate_key_with_bits,(crypto_pk_t *env, int bits));
-#define crypto_pk_generate_key(env)                     \
-  crypto_pk_generate_key_with_bits((env), (PK_BYTES*8))
+MOCK_DECL(int, crypto_pk_generate_key_with_bits,(crypto_pk_t *env, int bits, int tpm));
+#define crypto_pk_generate_key(env, tpm)                     \
+  crypto_pk_generate_key_with_bits((env), (PK_BYTES*8), (tpm))
 
 int crypto_pk_read_private_key_from_filename(crypto_pk_t *env,
-                                             const char *keyfile);
+                                             const char *keyfile, int tpm);
 int crypto_pk_write_public_key_to_string(crypto_pk_t *env,
                                          char **dest, size_t *len);
 int crypto_pk_write_private_key_to_string(crypto_pk_t *env,

@@ -122,9 +122,9 @@ bench_onion_TAP(void)
 
   key = crypto_pk_new();
   key2 = crypto_pk_new();
-  if (crypto_pk_generate_key_with_bits(key, 1024) < 0)
+  if (crypto_pk_generate_key_with_bits(key, 1024,0) < 0)
     goto done;
-  if (crypto_pk_generate_key_with_bits(key2, 1024) < 0)
+  if (crypto_pk_generate_key_with_bits(key2, 1024,0) < 0)
     goto done;
 
   reset_perftime();

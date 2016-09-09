@@ -967,7 +967,7 @@ test_utils(void *arg)
     char digest[DIGEST_LEN];
     sr_commit_t commit;
 
-    tt_assert(!crypto_pk_generate_key(k));
+    tt_assert(!crypto_pk_generate_key(k,0));
 
     tt_int_op(0, ==, crypto_pk_get_digest(k, digest));
     memcpy(commit.rsa_identity, digest, sizeof(commit.rsa_identity));

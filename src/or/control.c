@@ -4543,7 +4543,7 @@ add_onion_helper_keyarg(const char *arg, int discard_pk,
         !strcasecmp(key_type_best, key_blob)) {
       /* "RSA1024", RSA 1024 bit, also currently "BEST" by default. */
       pk = crypto_pk_new();
-      if (crypto_pk_generate_key(pk)) {
+      if (crypto_pk_generate_key(pk, 0)) {
         tor_asprintf(&err_msg, "551 Failed to generate %s key\r\n",
                      key_type_rsa1024);
         goto err;

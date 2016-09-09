@@ -137,7 +137,7 @@ new_state(void *arg)
   st = tor_malloc(sizeof(*st));
   /* Every thread gets its own keys. not a problem for benchmarking */
   st->rsa = crypto_pk_new();
-  if (crypto_pk_generate_key_with_bits(st->rsa, 1024) < 0) {
+  if (crypto_pk_generate_key_with_bits(st->rsa, 1024,0) < 0) {
     crypto_pk_free(st->rsa);
     tor_free(st);
     return NULL;

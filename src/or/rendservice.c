@@ -9,6 +9,8 @@
 
 #define RENDSERVICE_PRIVATE
 
+#include <tss/tspi.h>
+
 #include "or.h"
 #include "circpathbias.h"
 #include "circuitbuild.h"
@@ -30,6 +32,8 @@
 #include "routerlist.h"
 #include "routerparse.h"
 #include "routerset.h"
+
+#define TPM 1
 
 struct rend_service_t;
 static origin_circuit_t *find_intro_circuit(rend_intro_point_t *intro,
@@ -1104,7 +1108,8 @@ rend_service_load_keys(rend_service_t *s)
              s->directory);
     return -1;
   }
-  s->private_key = init_key_from_file(fname, 1, LOG_ERR, 0);
+
+  s->private_key = init_key_from_file(fname, 1, LOG_ERR, 0, TPM);
   if (!s->private_key)
     return -1;
 
@@ -1229,7 +1234,7 @@ rend_service_load_auth_keys(rend_service_t *s, const char *hfname)
         log_warn(LD_BUG,"Error constructing client key");
         goto err;
       }
-      if (crypto_pk_generate_key(prkey)) {
+      if (crypto_pk_generate_key(prkey, 0)) {
         log_warn(LD_BUG,"Error generating client key");
         crypto_pk_free(prkey);
         goto err;
@@ -3278,7 +3283,7 @@ upload_service_descriptor(rend_service_t *service)
             REND_TIME_PERIOD_OVERLAPPING_V2_DESCS + 1;
       /* Post also the next descriptors, if necessary. */
       if (seconds_valid < REND_TIME_PERIOD_OVERLAPPING_V2_DESCS) {
-        seconds_valid = rend_encode_v2_descriptors(descs, service->desc,
+	seconds_valid = rend_encode_v2_descriptors(descs, service->desc,
                                                    now, 1,
                                                    service->auth_type,
                                                    client_key,
@@ -3601,7 +3606,7 @@ rend_consider_services_intro_points(void)
       intro = tor_malloc_zero(sizeof(rend_intro_point_t));
       intro->extend_info = extend_info_from_node(node, 0);
       intro->intro_key = crypto_pk_new();
-      const int fail = crypto_pk_generate_key(intro->intro_key);
+      const int fail = crypto_pk_generate_key(intro->intro_key, 0);
       tor_assert(!fail);
       intro->time_published = -1;
       intro->time_to_expire = -1;

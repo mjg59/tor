@@ -1166,13 +1166,13 @@ test_crypto_pk(void *arg)
                                                         get_fname("pkey1")));
   /* failing case for read: can't read. */
   tt_assert(crypto_pk_read_private_key_from_filename(pk2,
-                                                   get_fname("xyzzy")) < 0);
+						     get_fname("xyzzy"), 0) < 0);
   write_str_to_file(get_fname("xyzzy"), "foobar", 6);
   /* Failing case for read: no key. */
   tt_assert(crypto_pk_read_private_key_from_filename(pk2,
-                                                   get_fname("xyzzy")) < 0);
+						     get_fname("xyzzy"), 0) < 0);
   tt_assert(! crypto_pk_read_private_key_from_filename(pk2,
-                                                         get_fname("pkey1")));
+						       get_fname("pkey1"), 0));
   tt_int_op(15,OP_EQ,
             crypto_pk_private_decrypt(pk2, data3, sizeof(data3), data1, 128,
                                         PK_PKCS1_OAEP_PADDING,1));

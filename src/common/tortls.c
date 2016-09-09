@@ -1049,14 +1049,14 @@ tor_tls_context_new(crypto_pk_t *identity, unsigned int key_lifetime,
   /* Generate short-term RSA key for use with TLS. */
   if (!(rsa = crypto_pk_new()))
     goto error;
-  if (crypto_pk_generate_key(rsa)<0)
+  if (crypto_pk_generate_key(rsa,0)<0)
     goto error;
   if (!is_client) {
     /* Generate short-term RSA key for use in the in-protocol ("v3")
      * authentication handshake. */
     if (!(rsa_auth = crypto_pk_new()))
       goto error;
-    if (crypto_pk_generate_key(rsa_auth)<0)
+    if (crypto_pk_generate_key(rsa_auth,0)<0)
       goto error;
     /* Create a link certificate signed by identity key. */
     cert = tor_tls_create_certificate(rsa, identity, nickname, nn2,

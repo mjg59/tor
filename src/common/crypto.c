@@ -42,6 +42,12 @@ DISABLE_GCC_WARNING(redundant-decls)
 #include <openssl/conf.h>
 #include <openssl/hmac.h>
 
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <tss/tspi.h>
+
 ENABLE_GCC_WARNING(redundant-decls)
 
 #if __GNUC__ && GCC_VERSION >= 402
@@ -117,6 +123,9 @@ struct crypto_pk_t
 {
   int refs; /**< reference count, so we don't have to copy keys */
   RSA *key; /**< The key itself */
+  char tpm;
+  TSS_HCONTEXT context;
+  TSS_HKEY tpmkey;
 };
 
 /** Key and stream information for a stream cipher. */
@@ -469,6 +478,7 @@ crypto_new_pk_from_rsa_(RSA *rsa)
   env = tor_malloc(sizeof(crypto_pk_t));
   env->refs = 1;
   env->key = rsa;
+  env->tpm = 0;
   return env;
 }
 
@@ -546,6 +556,9 @@ crypto_pk_free(crypto_pk_t *env)
   if (env->key)
     RSA_free(env->key);
 
+  if (env->tpm) {
+    Tspi_Context_Close(env->context);
+  }
   tor_free(env);
 }
 
@@ -598,16 +611,162 @@ crypto_cipher_free(crypto_cipher_t *env)
   tor_free(env);
 }
 
+/* TPM helpers */
+
+/*
+ * Extract the public key from a TPM key and embed it in the pk structure
+ */
+int crypto_tpm_pubkey_setup(crypto_pk_t *env)
+{
+  TSS_RESULT result;
+  UINT32 mod_length, e_length;
+  BYTE *mod_data, *e_data;
+  char *string;
+  int len;
+
+  result = Tspi_GetAttribData(env->tpmkey, TSS_TSPATTRIB_RSAKEY_INFO,
+                              TSS_TSPATTRIB_KEYINFO_RSA_MODULUS, &mod_length,
+                              &mod_data);
+  if (result) {
+    log_warn(LD_GENERAL, "Unable to obtain public key from TPM key blob");
+    return -1;
+  }
+  result = Tspi_GetAttribData(env->tpmkey, TSS_TSPATTRIB_RSAKEY_INFO,
+                              TSS_TSPATTRIB_KEYINFO_RSA_EXPONENT, &e_length,
+                              &e_data);
+  if (result) {
+    log_warn(LD_GENERAL, "Unable to obtain public key exponent from TPM key blob");
+    return -1;
+  }
+
+  env->key->n = BN_bin2bn(mod_data, mod_length, NULL);
+  env->key->e = BN_bin2bn(e_data, e_length, NULL);
+
+  Tspi_Context_FreeMemory(env->context, mod_data);
+  Tspi_Context_FreeMemory(env->context, e_data);
+  return 0;
+}
+
+/*
+ * Connect to a TPM daemon
+ */
+int crypto_tpm_connect(crypto_pk_t *env)
+{
+  TSS_RESULT result;
+  TSS_HCONTEXT context;
+
+  result = Tspi_Context_Create(&context);
+  if (result) {
+    log_warn(LD_GENERAL, "Unable to create TPM context");
+    return -1;
+  }
+  result = Tspi_Context_Connect(context, NULL);
+  if (result) {
+    log_warn(LD_GENERAL, "Unable to connect to TPM daemon");
+    return -1;
+  }
+  env->context = context;
+  return 0;
+}
+
 /* public key crypto */
 
 /** Generate a <b>bits</b>-bit new public/private keypair in <b>env</b>.
+ * If <b>tpm</b> is true, generate the key on the TPM.
  * Return 0 on success, -1 on failure.
  */
 MOCK_IMPL(int,
-          crypto_pk_generate_key_with_bits,(crypto_pk_t *env, int bits))
+          crypto_pk_generate_key_with_bits,(crypto_pk_t *env, int bits, int tpm))
 {
   tor_assert(env);
 
+  env->tpm = tpm;
+
+  if (env->tpm) {
+    TSS_HKEY key, srk;
+    TSS_RESULT result;
+    TSS_UUID srk_uuid = TSS_UUID_SRK;
+    TSS_HPOLICY srk_policy;
+    unsigned char wellknown[20] = {0};
+    int tpm_bits;
+
+    switch (bits) {
+      case 1024:
+        tpm_bits = TSS_KEY_SIZE_1024;
+        break;
+      case 2048:
+        tpm_bits = TSS_KEY_SIZE_2048;
+        break;
+      default:
+        return -1;
+    }
+
+    if (crypto_tpm_connect(env) < 0) {
+      return -1;
+    }
+
+    result = Tspi_Context_LoadKeyByUUID(env->context, TSS_PS_TYPE_SYSTEM, srk_uuid, &srk);
+    if (result) {
+      log_warn(LD_GENERAL, "Unable to load TPM SRK");
+      return -1;
+    }
+    result = Tspi_Context_CreateObject(env->context, TSS_OBJECT_TYPE_POLICY, TSS_POLICY_USAGE, &srk_policy);
+    if (result) {
+      log_warn(LD_GENERAL, "Unable to create TPM SRK policy");
+      return -1;
+    }
+    result = Tspi_Policy_SetSecret(srk_policy, TSS_SECRET_MODE_SHA1, 20, wellknown);
+    if (result) {
+      log_warn(LD_GENERAL, "Unable to set policy secret for TPM SRK policy");
+      return -1;
+    }
+    result = Tspi_Policy_AssignToObject(srk_policy, srk);
+    if (result) {
+      log_warn(LD_GENERAL, "Unable to assign policy for TPM SRK policy");
+      return -1;
+    }
+    result = Tspi_Context_CreateObject(env->context, TSS_OBJECT_TYPE_RSAKEY,
+				       TSS_KEY_TYPE_LEGACY | tpm_bits |
+				       TSS_KEY_AUTHORIZATION |
+				       TSS_KEY_NOT_MIGRATABLE,
+				       &key);
+    if (result) {
+      log_warn(LD_GENERAL, "Unable to create TPM key object");
+      return -1;
+    }
+    result = Tspi_SetAttribUint32(key,TSS_TSPATTRIB_KEY_INFO,
+				  TSS_TSPATTRIB_KEYINFO_ENCSCHEME,
+				  TSS_ES_RSAESOAEP_SHA1_MGF1);
+    if (result) {
+      log_warn(LD_GENERAL, "Unable to assign TPM key attributes");
+      return -1;
+    }
+    result = Tspi_SetAttribUint32(key,TSS_TSPATTRIB_KEY_INFO,
+				  TSS_TSPATTRIB_KEYINFO_SIGSCHEME,
+				  TSS_SS_RSASSAPKCS1V15_DER);
+    if (result) {
+      log_warn(LD_GENERAL, "Unable to assign TPM key signing attributes");
+      return -1;
+    }
+    result = Tspi_Policy_AssignToObject(srk_policy, key);
+    if (result) {
+      log_warn(LD_GENERAL, "Unable to assign policy to new TPM key");
+      return -1;
+    }
+    result = Tspi_Key_CreateKey(key, srk, 0);
+    if (result) {
+      log_warn(LD_GENERAL, "Unable to create new TPM key");
+      return -1;
+    }
+    result = Tspi_Key_LoadKey(key, srk);
+    if (result) {
+      log_warn(LD_GENERAL, "Unable to load new TPM key");
+      return -1;
+    }
+    env->tpmkey = key;
+    crypto_tpm_pubkey_setup(env);
+    return 0;
+  }
   if (env->key) {
     RSA_free(env->key);
     env->key = NULL;
@@ -678,15 +837,99 @@ crypto_pk_read_private_key_from_string(crypto_pk_t *env,
 }
 
 /** Read a PEM-encoded private key from the file named by
- * <b>keyfile</b> into <b>env</b>.  Return 0 on success, -1 on failure.
+ * <b>keyfile</b> into <b>env</b>. Assumes a TPM key blob if <b>tpm</b> is
+ * true. Return 0 on success, -1 on failure.
  */
 int
 crypto_pk_read_private_key_from_filename(crypto_pk_t *env,
-                                         const char *keyfile)
+                                         const char *keyfile, int tpm)
 {
   char *contents;
   int r;
 
+  env->tpm = tpm;
+
+  if (env->tpm) {
+    int fd;
+    struct stat statbuf;
+    BYTE *data;
+    size_t size;
+    TSS_HKEY key, srk;
+    TSS_UUID srk_uuid = TSS_UUID_SRK;
+    TSS_HPOLICY srk_policy;
+    TSS_RESULT result;
+    unsigned char wellknown[20] = {0};
+
+    r = crypto_tpm_connect(env);
+    if (r < 0) {
+      return -1;
+    }
+    fd = tor_open_cloexec(keyfile, O_RDONLY|O_BINARY, 0);
+    if (!fd) {
+      log_warn(LD_GENERAL, "Unable to open service keystore");
+      return -1;
+    }
+
+    if (fstat(fd, &statbuf)<0) {
+      int save_errno = errno;
+      close(fd);
+      log_warn(LD_FS,"Could not fstat \"%s\".",keyfile);
+      errno = save_errno;
+      return -1;
+    }
+
+    size = statbuf.st_size;
+
+    data = tor_malloc(size);
+
+    r = read_all(fd,(char *)data,size,0);
+    if (r<0) {
+      int save_errno = errno;
+      log_warn(LD_FS,"Error reading from file \"%s\": %s", keyfile,
+               strerror(errno));
+      close(fd);
+      errno = save_errno;
+      return -1;
+    }
+
+    result = Tspi_Context_LoadKeyByUUID(env->context, TSS_PS_TYPE_SYSTEM,
+					srk_uuid, &srk);
+    if (result) {
+      log_warn(LD_GENERAL, "Unable to load srk");
+      return -1;
+    }
+    result = Tspi_Context_CreateObject(env->context, TSS_OBJECT_TYPE_POLICY,
+				       TSS_POLICY_USAGE, &srk_policy);
+    if (result) {
+      log_warn(LD_GENERAL, "Unable to create srk policy");
+      return -1;
+    }
+    result = Tspi_Policy_SetSecret(srk_policy, TSS_SECRET_MODE_SHA1, 20,
+				   wellknown);
+    if (result) {
+      log_warn(LD_GENERAL, "Unable to set srk policy secret");
+      return -1;
+    }
+    result = Tspi_Policy_AssignToObject(srk_policy, srk);
+    if (result) {
+      log_warn(LD_GENERAL, "Unable to assign srk policy");
+      return -1;
+    }
+
+    result = Tspi_Context_LoadKeyByBlob(env->context, srk, size, data, &key);
+    if (result) {
+      log_warn(LD_GENERAL, "Unable to load key blob");
+      return -1;
+    }
+    result = Tspi_Policy_AssignToObject(srk_policy, key);
+    if (result) {
+      log_warn(LD_GENERAL, "Unable to assign key policy");
+      return -1;
+    }
+    env->tpmkey = key;
+    crypto_tpm_pubkey_setup(env);
+    return 0;
+  }
   /* Read the file into a string. */
   contents = read_file_to_str(keyfile, 0, NULL);
   if (!contents) {
@@ -822,6 +1065,37 @@ crypto_pk_write_private_key_to_filename(crypto_pk_t *env,
   char *s;
   int r;
 
+  if (env->tpm) {
+    FILE *output;
+    BYTE *data;
+    UINT32 datasize;
+    TSS_RESULT result;
+
+    output = fopen(fname, "wb");
+    if (!output) {
+      log_warn(LD_GENERAL, "Unable to open keystore");
+      return -1;
+    }
+
+    result = Tspi_GetAttribData(env->tpmkey, TSS_TSPATTRIB_KEY_BLOB,
+                                TSS_TSPATTRIB_KEYBLOB_BLOB, &datasize, &data);
+    if (result) {
+      log_warn(LD_GENERAL, "Unable to obtain keyblob");
+      fclose(output);
+      return -1;
+    }
+
+    if (fwrite(data, 1, datasize, output) != datasize) {
+      log_warn(LD_GENERAL, "Unable to write keystore");
+      Tspi_Context_FreeMemory(env->context, data);
+      fclose(output);
+      return -1;
+    }
+
+    Tspi_Context_FreeMemory(env->context, data);
+    fclose(output);
+    return 0;
+  }
   tor_assert(crypto_pk_private_ok(env));
 
   if (!(bio = BIO_new(BIO_s_mem())))
@@ -851,6 +1125,10 @@ crypto_pk_check_key(crypto_pk_t *env)
 {
   int r;
   tor_assert(env);
+
+  if (env->tpm) {
+    return 1;
+  }
 
   r = RSA_check_key(env->key);
   if (r <= 0)
@@ -1045,11 +1323,43 @@ crypto_pk_public_encrypt(crypto_pk_t *env, char *to, size_t tolen,
                          const char *from, size_t fromlen, int padding)
 {
   int r;
+  unsigned char oaepPad[] = "TCPA";
+  int oaepPadLen = 4;
+  BYTE encodedData[256];
+  int encodedDataLen;
+
   tor_assert(env);
   tor_assert(from);
   tor_assert(to);
   tor_assert(fromlen<INT_MAX);
   tor_assert(tolen >= crypto_pk_keysize(env));
+
+  if (env->tpm) {
+    TSS_RESULT result;
+    TSS_HENCDATA tpmdata;
+    UINT32 datalen;
+    BYTE* data;
+
+    result = Tspi_Context_CreateObject(env->context, TSS_OBJECT_TYPE_ENCDATA,
+      TSS_ENCDATA_BIND, &tpmdata);
+    if (result) {
+      log_warn(LD_GENERAL, "Unable to create encoded data object - 0x%x", result);
+      return -1;
+    }
+    result = Tspi_Data_Bind(tpmdata, env->tpmkey, fromlen, from);
+    if (result) {
+      return -1;
+    }
+    result = Tspi_GetAttribData(tpmdata, TSS_TSPATTRIB_ENCDATA_BLOB,
+      TSS_TSPATTRIB_ENCDATABLOB_BLOB, &datalen, &data);
+    if (result) {
+      log_warn(LD_GENERAL, "Unable to obtain data from blob");
+      return -1;
+    }
+    memcpy(to, data, datalen);
+    Tspi_Context_FreeMemory(env->context, data);
+    return datalen;
+  }
 
   r = RSA_public_encrypt((int)fromlen,
                          (unsigned char*)from, (unsigned char*)to,
@@ -1082,6 +1392,38 @@ crypto_pk_private_decrypt(crypto_pk_t *env, char *to,
   tor_assert(env->key);
   tor_assert(fromlen<INT_MAX);
   tor_assert(tolen >= crypto_pk_keysize(env));
+  if (env->tpm) {
+    TSS_RESULT result;
+    TSS_HENCDATA tpmdata;
+    UINT32 datalen;
+    BYTE* data;
+
+    result = Tspi_Context_CreateObject(env->context, TSS_OBJECT_TYPE_ENCDATA,
+      TSS_ENCDATA_BIND, &tpmdata);
+    if (result) {
+      log_warn(LD_GENERAL, "Unable to create encoded data object");
+      return -1;
+    }
+    result = Tspi_SetAttribData(tpmdata, TSS_TSPATTRIB_ENCDATA_BLOB,
+      TSS_TSPATTRIB_ENCDATABLOB_BLOB, fromlen, from);
+    if (result) {
+      log_warn(LD_GENERAL, "Unable to assign data to blob");
+      return -1;
+    }
+    result = Tspi_Data_Unbind(tpmdata, env->tpmkey, &datalen, &data);
+    if (result) {
+      log_warn(LD_GENERAL, "Unable to decrypt data: 0x%x", result);
+      return -1;
+    }
+    if (datalen > tolen) {
+      log_warn(LD_GENERAL, "Received too much decrypted data");
+      Tspi_Context_FreeMemory(env->context, data);
+      return -1;
+    }
+    memcpy(to, data, datalen);
+    Tspi_Context_FreeMemory(env->context, data);
+    return datalen;
+  }
   if (!crypto_pk_key_is_private(env))
     /* Not a private key */
     return -1;
@@ -1188,6 +1530,42 @@ crypto_pk_private_sign(const crypto_pk_t *env, char *to, size_t tolen,
   tor_assert(to);
   tor_assert(fromlen < INT_MAX);
   tor_assert(tolen >= crypto_pk_keysize(env));
+  if (env->tpm) {
+    TSS_RESULT result;
+    TSS_HHASH hash;
+    BYTE* signature;
+    UINT32 siglen;
+
+    result = Tspi_Context_CreateObject(env->context,
+	    TSS_OBJECT_TYPE_HASH, TSS_HASH_OTHER, &hash);
+    if (result) {
+      log_warn(LD_GENERAL, "Unable to create hash object");
+      return -1;
+    }
+    result = Tspi_SetAttribData(hash,TSS_TSPATTRIB_HASH_IDENTIFIER, 0, 0, NULL);
+    if (result) {
+      log_warn(LOG_WARN, "Unable to set tpm hash");
+      return -1;
+    }
+    result = Tspi_Hash_SetHashValue(hash, fromlen, from);
+    if (result) {
+      log_warn(LOG_WARN, "Unable to set tpm hash");
+      return -1;
+    }
+    result = Tspi_Hash_Sign(hash, env->tpmkey, &siglen, &signature);
+    if (result) {
+      log_warn(LOG_WARN, "Unable to sign hash: 0x%x", result);
+      return -1;
+    }
+    if (siglen > tolen) {
+      log_warn(LOG_WARN, "Signature length mismatch");
+      Tspi_Context_FreeMemory(env->context, signature);
+      return -1;
+    }
+    memcpy(to, signature, siglen);
+    Tspi_Context_FreeMemory(env->context, signature);
+    return siglen;
+  }
   if (!crypto_pk_key_is_private(env))
     /* Not a private key */
     return -1;

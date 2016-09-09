@@ -567,6 +567,10 @@ fi
 LIBS="$save_LIBS"
 AC_SUBST(TOR_LIB_MATH)
 
+dnl Trousers
+TOR_LIB_TSPI="-ltspi"
+AC_SUBST(TOR_LIB_TSPI)
+
 dnl ------------------------------------------------------
 dnl Where do you live, openssl?  And how do we call you?
 
@@ -699,7 +703,7 @@ dnl since sometimes the linker will like an option but not be willing to
 dnl use it with a build of a library.
 
 all_ldflags_for_check="$TOR_LDFLAGS_zlib $TOR_LDFLAGS_openssl $TOR_LDFLAGS_libevent"
-all_libs_for_check="$TOR_ZLIB_LIBS $TOR_LIB_MATH $TOR_LIBEVENT_LIBS $TOR_OPENSSL_LIBS $TOR_SYSTEMD_LIBS $TOR_LIB_WS32 $TOR_LIB_GDI $TOR_CAP_LIBS"
+all_libs_for_check="$TOR_ZLIB_LIBS $TOR_LIB_MATH $TOR_LIBEVENT_LIBS $TOR_OPENSSL_LIBS $TOR_SYSTEMD_LIBS $TOR_LIB_WS32 $TOR_LIB_GDI $TOR_CAP_LIBS $TOR_LIB_TSPI"
 
 CFLAGS_FTRAPV=
 CFLAGS_FWRAPV=
